@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Gallery</title></head>
+<body>
+  <img src="/images/hero_hu_2025550143.webp" alt="hero">
+</body>
+</html>

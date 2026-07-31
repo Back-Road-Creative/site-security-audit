@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Contact</title></head>
+<body>
+  <p>Call <a href="tel:+12025550143">(202) 555-0143</a>.</p>
+</body>
+</html>

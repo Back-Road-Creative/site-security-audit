@@ -1,0 +1,8 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Debug</title></head>
+<body>
+  <!-- upstream: 192.168.1.50, fallback 10.0.0.7 -->
+  <p>Hello.</p>
+</body>
+</html>

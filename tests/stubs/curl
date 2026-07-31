@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Test double for curl. Records every invocation to $CURL_LOG (one line of
+# arguments per call) and answers from fixture files, so tests can assert on
+# the requests the auditor makes without any network access.
+#
+#   CURL_LOG          file to append invocations to (required)
+#   STUB_HEADERS      file served for `curl -sI` (header) requests
+#   STUB_HTML         file served for body requests
+#   STUB_PATH_STATUS  status echoed for `-w %{http_code}` probes (default 404)
+#   STUB_MAP          directory of per-host overrides: <host>.headers and
+#                     <host>.html win over STUB_HEADERS / STUB_HTML. Lets one
+#                     run serve a different site per URL.
+set -uo pipefail
+
+printf '%s\n' "$*" >> "${CURL_LOG:?CURL_LOG must be set}"
+
+args="$*"
+
+# Host of the requested URL, for the per-host override lookup.
+host=""
+for a in "$@"; do
+    case "$a" in
+        http://*|https://*)
+            host="${a#*://}"
+            host="${host%%/*}"
+            host="${host%%\?*}"
+            ;;
+    esac
+done
+
+pick() { # $1 = suffix, $2 = fallback file
+    if [[ -n "${STUB_MAP:-}" && -n "$host" && -f "${STUB_MAP}/${host}.$1" ]]; then
+        printf '%s' "${STUB_MAP}/${host}.$1"
+    else
+        printf '%s' "${2:-}"
+    fi
+}
+
+if [[ "$args" == *"%{http_code}"* ]]; then
+    printf '%s' "${STUB_PATH_STATUS:-404}"
+elif [[ "$args" == *"-sI"* ]]; then
+    f=$(pick headers "${STUB_HEADERS:-}")
+    [[ -n "$f" && -f "$f" ]] && cat "$f"
+else
+    f=$(pick html "${STUB_HTML:-}")
+    [[ -n "$f" && -f "$f" ]] && cat "$f"
+fi
+
+exit 0

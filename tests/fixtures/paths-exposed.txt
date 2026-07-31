@@ -1,0 +1,3 @@
+.env:200
+.git/config:200
+.gitignore:404

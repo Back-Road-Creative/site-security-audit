@@ -1,0 +1,18 @@
+# gitleaks configuration.
+#
+# This repository is a secret *detector*, so it necessarily contains strings
+# shaped like credentials: they are the fixtures the detection patterns are
+# tested against. They are synthetic keyboard patterns that have never been
+# issued by any provider — see tests/fixtures/README.md.
+#
+# Nothing outside tests/fixtures/ is allowlisted. A credential appearing
+# anywhere else in this repository is a real finding.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic credential fixtures for the detection patterns"
+paths = [
+  '''tests/fixtures/.*''',
+]

@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Hashed assets</title>
+  <link rel="stylesheet" href="/css/main.2025550143ab.css">
+</head>
+<body>
+  <script src="/js/app.2025550143ab.js"></script>
+</body>
+</html>

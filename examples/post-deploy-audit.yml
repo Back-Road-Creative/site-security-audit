@@ -1,0 +1,57 @@
+# Example: gate a deploy on the audit.
+#
+# Copy into your site repo as .github/workflows/post-deploy-audit.yml, drop
+# security-audit.sh in .github/scripts/, and replace SITE_URL with your host.
+#
+# The step distinguishes the three exit codes: 1 (critical) fails the job,
+# 2 (warnings) annotates the run and lets it through, 0 is silent.
+name: Post-deploy security audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily, so an expiring certificate or a header regression is caught even
+    # in a week with no deploys.
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+env:
+  SITE_URL: https://your-site.example
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run security audit
+        env:
+          # Contact details you publish on purpose. Without these the audit
+          # reports your own footer as a PII leak.
+          SECURITY_AUDIT_ALLOWED_EMAILS: hello@your-site.example
+          SECURITY_AUDIT_ALLOWED_PHONES: '15550100000'
+        run: |
+          chmod +x .github/scripts/security-audit.sh
+          set +e
+          .github/scripts/security-audit.sh "$SITE_URL"
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "Audit clean." ;;
+            2) echo "::warning::Security audit reported warnings (non-blocking)" ;;
+            *) echo "::error::Security audit found critical issues"; exit "$code" ;;
+          esac
+
+      - name: Save JSON report
+        if: always()
+        run: |
+          chmod +x .github/scripts/security-audit.sh
+          .github/scripts/security-audit.sh --json "$SITE_URL" > audit.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-audit-report
+          path: audit.json

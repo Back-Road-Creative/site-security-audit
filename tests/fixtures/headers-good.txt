@@ -1,0 +1,9 @@
+HTTP/2 200
+date: Mon, 01 Jan 2035 00:00:00 GMT
+content-type: text/html; charset=utf-8
+content-security-policy: default-src 'self'; object-src 'none'; base-uri 'self'
+x-frame-options: DENY
+x-content-type-options: nosniff
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+referrer-policy: strict-origin-when-cross-origin
+permissions-policy: camera=(), microphone=(), geolocation=()

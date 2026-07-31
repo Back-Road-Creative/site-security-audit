@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Example Site</title>
+  <link rel="stylesheet" href="/css/main.css">
+</head>
+<body>
+  <h1>Example Site</h1>
+  <p>A static page with nothing sensitive on it.</p>
+  <script src="/js/site.js"></script>
+</body>
+</html>

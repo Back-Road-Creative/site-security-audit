@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Analytics</title>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-ABC1234567"></script>
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-1234567890123456"></script>
+</head>
+<body>
+  <p>Tags: GTM-ABC1234 and AW-123456789 and UA-12345-6</p>
+</body>
+</html>

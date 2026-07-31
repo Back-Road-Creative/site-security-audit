@@ -1,0 +1,2 @@
+.env:404
+.git/config:404

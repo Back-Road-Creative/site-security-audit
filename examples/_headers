@@ -1,0 +1,136 @@
+# =============================================================================
+# _headers — Cloudflare Pages response-header starter
+#
+# Drop this in your site's `static/` directory (Hugo) or wherever your generator
+# copies files verbatim into the publish root, and Cloudflare Pages will apply
+# it. Netlify uses the same file format.
+#
+# This is a STARTER, not a drop-in. The `script-src` list below is deliberately
+# empty of third parties: every host you add is a host that can execute code on
+# your origin. Add them one at a time, and only after checking the browser
+# console for what actually broke.
+#
+# Verify the result from outside with:
+#     ./security-audit.sh https://your-site.example
+# =============================================================================
+
+/*
+  # ---- Framing and content sniffing ----
+  # DENY, not SAMEORIGIN: a static marketing site has no reason to be framed at
+  # all, and SAMEORIGIN still permits framing from any page on the same origin.
+  # Relax to SAMEORIGIN only if you actually embed your own pages in each other.
+  X-Frame-Options: DENY
+  # Stops the browser second-guessing Content-Type. Without it, a file you serve
+  # as text/plain can be re-interpreted as HTML or JavaScript.
+  X-Content-Type-Options: nosniff
+
+  # ---- Referrer ----
+  # Full URL to same-origin, origin only to other HTTPS sites, nothing on a
+  # downgrade to HTTP. Keeps page paths (which can carry search terms or IDs)
+  # out of third-party logs while keeping analytics referrers useful.
+  Referrer-Policy: strict-origin-when-cross-origin
+
+  # ---- Powerful features ----
+  # Empty allowlist = feature switched off for this document and any iframe in
+  # it. Turn one back on only where a page genuinely needs it. `interest-cohort`
+  # is a legacy opt-out; harmless to keep, ignored by current browsers.
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()
+
+  # ---- HSTS ----
+  # Two years, all subdomains, and `preload` so browsers refuse plain HTTP to
+  # this host before the first request.
+  #
+  # READ THIS BEFORE SHIPPING `preload`: submitting to the preload list is
+  # effectively irreversible on a normal timescale (removal takes months to
+  # reach shipped browsers), and `includeSubDomains` covers EVERY subdomain,
+  # including internal ones you may not have thought about. If any hostname
+  # under this domain still needs to answer on HTTP, drop `preload`, and drop
+  # `includeSubDomains` too. Start with `max-age=300`, confirm nothing breaks,
+  # then raise it.
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+
+  # ---- Content Security Policy ----
+  # The whole point of the policy below is that `script-src` has neither
+  # 'unsafe-inline' nor 'unsafe-eval'. That single property is what turns a
+  # stray injected <script> or an `onclick=` attribute from a compromise into a
+  # console error. It also means:
+  #   - No inline <script> blocks. Move them to files under /js/.
+  #   - No inline event-handler attributes (onclick, onload, ...). Attach
+  #     listeners from a script file instead.
+  #   - No eval / new Function / setTimeout("string").
+  # If you need one inline block, prefer a per-response nonce or a 'sha256-...'
+  # hash of the exact script over reopening 'unsafe-inline' for everything.
+  #
+  # style-src keeps 'unsafe-inline' as a pragmatic exception: `style="..."`
+  # attributes are pervasive in generated HTML and theme shortcodes, and inline
+  # CSS is a far weaker exploitation primitive than inline JS. Removing it is a
+  # worthwhile second pass, not a blocker for the first.
+  #
+  # The rest, in order:
+  #   default-src 'self'  — anything not named below comes from this origin only.
+  #   font-src 'self'     — self-host your fonts. A third-party font host sees
+  #                         every visitor's IP and referring page.
+  #   img-src 'self' data: — data: covers small inline SVG/placeholder images.
+  #   connect-src 'self'  — a static site makes no XHR/fetch/WebSocket calls off
+  #                         its own origin; if it does, name the exact hosts.
+  #   frame-src 'none'    — no iframes embedded. Add specific hosts if you embed
+  #                         video, and prefer the privacy-preserving variant of
+  #                         whatever provider you use.
+  #   object-src 'none'   — no Flash/Java/plugin content. Nothing legitimate
+  #                         needs this in a modern site.
+  #   base-uri 'self'     — stops an injected <base> tag silently re-pointing
+  #                         every relative URL on the page at an attacker.
+  #   form-action 'self'  — a form injected into your page cannot POST the data
+  #                         it collects to somebody else's server. Add your form
+  #                         backend's host here if you use one.
+  #   frame-ancestors 'none' — the CSP-level equivalent of X-Frame-Options, and
+  #                         the one modern browsers actually enforce. Keep both:
+  #                         the header above covers older clients.
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+
+# =============================================================================
+# Cache-Control, tiered by how a file changes
+#
+# The rule is: cache aggressively only what carries a content hash in its name.
+# Everything else gets a short TTL so a fix is visible the same day.
+# =============================================================================
+
+# HTML: short TTL. These are the URLs people bookmark and share, and their
+# content changes on every deploy while the filename stays the same. One hour
+# means a correction is live within the hour without a purge; ETag revalidation
+# makes the repeat requests cheap (304, no body).
+/
+  Cache-Control: public, max-age=3600
+/*.html
+  Cache-Control: public, max-age=3600
+
+# Fingerprinted build output: the filename changes whenever the bytes change,
+# so the old URL can be cached forever and the new deploy simply requests a
+# different one. `immutable` additionally tells the browser not to revalidate
+# on reload. Only apply this to hashed filenames — on an unhashed /js/app.js it
+# strands users on stale code for a year with no way to recover.
+/css/*
+  Cache-Control: public, max-age=31536000, immutable
+/js/*
+  Cache-Control: public, max-age=31536000, immutable
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Images: usually content-hashed by the image pipeline, and cheap to re-fetch
+# when they are not. A year is safe for a hashed name; drop to a day if your
+# generator emits stable filenames and you overwrite them in place.
+/images/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Large generated data files (JSON/CSV exports feeding a dashboard) that
+# regenerate on a schedule rather than per deploy. A few hours of browser TTL
+# followed by ETag revalidation means a regeneration is picked up well within a
+# day without re-downloading megabytes on every page view.
+/data/*
+  Cache-Control: public, max-age=14400
+
+# Vendored third-party libraries with unhashed filenames, changing only when you
+# deliberately upgrade them. A week: the upgrade propagates within a week, and
+# ETag 304s cost almost nothing in between.
+/vendor/*
+  Cache-Control: public, max-age=604800

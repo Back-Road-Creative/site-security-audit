@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Contact</title></head>
+<body>
+  <p>Write to <a href="mailto:hello@testsite.invalid">hello@testsite.invalid</a>.</p>
+</body>
+</html>

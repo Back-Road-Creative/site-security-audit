@@ -1,0 +1,4 @@
+notBefore=Jan  1 00:00:00 2035 GMT
+notAfter=Dec 31 23:59:59 2035 GMT
+issuer=C = US, O = Example CA, CN = Example Root
+subject=CN = example.com
