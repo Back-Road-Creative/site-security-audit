@@ -12,7 +12,7 @@ issue for a security report.
 
 - Preferred: GitHub's **Security → Report a vulnerability** tab on this
   repository (Private Vulnerability Reporting).
-- Fallback: e-mail **joepetjr@gmail.com** with `site-security-audit security` in
+- Fallback: e-mail **backroadcreativeco@gmail.com** with `site-security-audit security` in
   the subject.
 
 Please include the affected version or commit, what the issue is and what it
