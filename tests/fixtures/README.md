@@ -9,7 +9,7 @@ string is a synthetic placeholder that has never been issued by any provider.
 
 | Prefix | Fed to | Via |
 |---|---|---|
-| `headers-*` | response headers | `MOCK_HEADERS` |
+| `headers-*` | response headers (`headers-redirect-chain.txt` is a two-hop `curl -D` dump, CRLF) | `MOCK_HEADERS`, or `STUB_GET_HEADERS` for the curl stub |
 | `html-*` | page body | `MOCK_HTML` |
 | `ssl-*` | `openssl x509 -dates` output | `MOCK_SSL` |
 | `paths-*` | path-probe answers, `path:status[:body-file[:content-type]]` | `MOCK_PATH_RESPONSES` |

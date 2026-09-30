@@ -177,6 +177,17 @@ likely to bite you — `preload` is close to irreversible, and `style-src
 'unsafe-inline'` is a deliberate, explained compromise. Read it before shipping
 it; it is a starting point, not a drop-in.
 
+## One request per site
+
+Headers and body come from a single GET per URL, so the report describes the
+response a visitor receives. No HEAD request is sent: servers and CDNs often
+answer HEAD differently (another cache key, a missing header, a 405), and a
+report built from a HEAD would describe a response no browser ever sees. The GET
+follows at most 5 redirects, waits at most 15 seconds and reads at most 2 MiB;
+the report lists each hop (`https://a/ (HTTP 301) -> https://b/ (HTTP 200)`) and
+the final URL, and judges the headers of the last response in the chain. Hitting
+a limit is a warning, never a silent partial result.
+
 ## How a path probe is judged
 
 A bare "the server said 200" is not evidence of an exposure: many hosts answer
@@ -213,7 +224,7 @@ checks against your own fixtures:
 
 | Variable | Effect |
 |---|---|
-| `MOCK_HEADERS` | file served instead of `curl -I` |
+| `MOCK_HEADERS` | file served instead of the response headers |
 | `MOCK_HTML` | file served instead of the page body |
 | `MOCK_SSL` | file served instead of `openssl x509 -dates` |
 | `MOCK_PATH_STATUS` | one HTTP status returned for every path probe (with no body, a 200 is inconclusive) |

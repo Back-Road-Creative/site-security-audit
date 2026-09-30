@@ -26,7 +26,7 @@
 #                                  "15550101234").
 #
 # Environment (test mode):
-#   MOCK_HEADERS  — file with mock curl -I response
+#   MOCK_HEADERS  — file with mock response headers
 #   MOCK_HTML     — file with mock HTML source
 #   MOCK_SSL      — file with mock openssl cert output
 #   MOCK_PATH_STATUS    — fixed HTTP status for all path probes
@@ -155,56 +155,78 @@ log_crit()  {
 }
 
 # ---- Data fetchers (mockable for testing) ----
-# Six checks need the same two responses. Without a cache that is six requests
-# against a site we have just deployed to; prime_response_cache makes it two.
+# Headers and body come from ONE bounded GET per URL. A separate HEAD for the
+# headers doubles the requests against a site we have just deployed to, and can
+# describe a different response from the one the body came from: servers and
+# CDNs routinely answer HEAD differently (another cache key, a missing
+# Content-Security-Policy, a 405). So no HEAD is ever sent, and the report
+# describes what a visitor's GET receives.
+#
 # The cache is filled from run_audit (not from inside a $(...) capture, where an
 # assignment would be discarded with the subshell) and keyed by URL so a
 # multi-URL run never serves one site's body for another.
+PAGE_MAX_TIME=15
+PAGE_MAX_REDIRS=5
+PAGE_MAX_BYTES=2097152   # 2 MiB
 _CACHE_URL=""
 _CACHE_HEADERS=""
 _CACHE_HTML=""
+_CACHE_CHAIN=""          # "url (HTTP 301) -> url (HTTP 200)"; empty under a mock
+_CACHE_FINAL=""
+_CACHE_RC=0
+
+# Reads a curl -D dump (one header block per redirect hop). Sets _CACHE_HEADERS
+# to the LAST block, the response the visitor ends up on, and _CACHE_CHAIN to
+# the hop-by-hop chain. A relative Location is recorded as sent.
+_parse_header_dump() {
+    local file="$1" line block="" code="" cur="$2" next="" chain=""
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        if [[ "$line" == HTTP/* ]]; then
+            if [[ -n "$code" ]]; then
+                chain+="${cur} (HTTP ${code}) -> "
+                [[ -n "$next" ]] && cur="$next"
+            fi
+            block="" next=""
+            code="${line#* }"
+            code="${code%% *}"
+        elif [[ "${line,,}" == location:* ]]; then
+            next=$(_trim "${line#*:}")
+        fi
+        [[ -z "$line" ]] || block+="${line}"$'\n'
+    done < "$file"
+    _CACHE_HEADERS="${block%$'\n'}"
+    [[ -n "$code" ]] && _CACHE_CHAIN="${chain}${cur} (HTTP ${code})"
+    return 0
+}
 
 prime_response_cache() {
     local url="$1"
-    _CACHE_URL=""
-    if [[ -n "${MOCK_HEADERS:-}" && -f "${MOCK_HEADERS}" ]]; then
-        _CACHE_HEADERS=$(cat "$MOCK_HEADERS")
-    else
-        _CACHE_HEADERS=$(curl -sI --max-time 10 "$url" 2>/dev/null)
+    _CACHE_URL="" _CACHE_HEADERS="" _CACHE_HTML="" _CACHE_CHAIN="" _CACHE_FINAL="$url" _CACHE_RC=0
+    local mock_h=false mock_b=false
+    [[ -n "${MOCK_HEADERS:-}" && -f "${MOCK_HEADERS}" ]] && mock_h=true
+    [[ -n "${MOCK_HTML:-}" && -f "${MOCK_HTML}" ]] && mock_b=true
+
+    # No request at all when both halves are mocked.
+    if ! { $mock_h && $mock_b; }; then
+        local body="${SCRATCH}/page.body" hdr="${SCRATCH}/page.hdr" final
+        rm -f "$body" "$hdr"
+        final=$(curl -s -L --max-redirs "$PAGE_MAX_REDIRS" --proto-redir =http,https \
+            --max-time "$PAGE_MAX_TIME" --max-filesize "$PAGE_MAX_BYTES" \
+            -D "$hdr" -o "$body" -w '%{url_effective}' "$url" 2>/dev/null)
+        _CACHE_RC=$?
+        [[ -n "$final" ]] && _CACHE_FINAL="$final"
+        [[ -f "$hdr" ]] && _parse_header_dump "$hdr" "$url"
+        [[ -f "$body" ]] && _CACHE_HTML=$(head -c "$PAGE_MAX_BYTES" "$body" 2>/dev/null | tr -d '\0')
     fi
-    if [[ -n "${MOCK_HTML:-}" && -f "${MOCK_HTML}" ]]; then
-        _CACHE_HTML=$(cat "$MOCK_HTML")
-    else
-        _CACHE_HTML=$(curl -s --max-time 15 "$url" 2>/dev/null)
-    fi
+    $mock_h && _CACHE_HEADERS=$(cat "$MOCK_HEADERS")
+    $mock_b && _CACHE_HTML=$(cat "$MOCK_HTML")
     _CACHE_URL="$url"
+    return 0
 }
 
-fetch_headers() {
-    local url="$1"
-    if [[ "$_CACHE_URL" == "$url" ]]; then
-        printf '%s\n' "$_CACHE_HEADERS"
-        return
-    fi
-    if [[ -n "${MOCK_HEADERS:-}" && -f "${MOCK_HEADERS}" ]]; then
-        cat "$MOCK_HEADERS"
-    else
-        curl -sI --max-time 10 "$url" 2>/dev/null
-    fi
-}
-
-fetch_html() {
-    local url="$1"
-    if [[ "$_CACHE_URL" == "$url" ]]; then
-        printf '%s\n' "$_CACHE_HTML"
-        return
-    fi
-    if [[ -n "${MOCK_HTML:-}" && -f "${MOCK_HTML}" ]]; then
-        cat "$MOCK_HTML"
-    else
-        curl -s --max-time 15 "$url" 2>/dev/null
-    fi
-}
+fetch_headers() { [[ "$_CACHE_URL" == "$1" ]] && printf '%s\n' "$_CACHE_HEADERS"; }
+fetch_html()    { [[ "$_CACHE_URL" == "$1" ]] && printf '%s\n' "$_CACHE_HTML"; }
 
 # One path probe. Results land in PROBE_* globals rather than on stdout because
 # the caller needs four values and a $(...) capture would run in a subshell.
@@ -351,6 +373,22 @@ is_allowed_phone() {
 }
 
 # ---- Check functions ----
+
+# Report how the one response was obtained: the redirect chain, and any limit
+# curl stopped at. Silent under a mock, where there is no request to describe.
+check_response() {
+    local rc="$_CACHE_RC"
+    if [[ -n "$_CACHE_CHAIN" ]]; then
+        log_pass "response: ${_CACHE_CHAIN} — final URL ${_CACHE_FINAL}; headers and body from this one GET (no HEAD sent)"
+    fi
+    case "$rc" in
+        0) ;;
+        28) log_warn "response" "request timed out after ${PAGE_MAX_TIME}s; results reflect a partial or missing response" ;;
+        47) log_warn "response" "more than ${PAGE_MAX_REDIRS} redirects; the chain was not followed to a final page" ;;
+        63) log_warn "response" "page is larger than $((PAGE_MAX_BYTES / 1048576)) MiB; content checks ran on a truncated body" ;;
+        *)  log_warn "response" "request did not complete cleanly (curl exit ${rc})" ;;
+    esac
+}
 
 check_headers() {
     local url="$1"
@@ -811,6 +849,10 @@ run_audit() {
 
     prime_response_cache "$url"
 
+    echo "── Response ──"
+    check_response
+
+    echo ""
     echo "── Security Headers ──"
     check_headers "$url"
     check_server_fingerprint "$url"
@@ -868,7 +910,7 @@ Environment (allowlists):
   SECURITY_AUDIT_ALLOWED_PHONES  Published numbers, e.g. "15550101234"
 
 Environment (test mode):
-  MOCK_HEADERS         Mock file for HTTP headers
+  MOCK_HEADERS         Mock file for the response headers
   MOCK_HTML            Mock file for page HTML
   MOCK_SSL             Mock file for SSL cert info
   MOCK_PATH_STATUS     Fixed HTTP status for all path probes

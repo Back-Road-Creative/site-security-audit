@@ -668,32 +668,79 @@ test_counters_reset_between_urls() {
 # ---- Request economy -------------------------------------------------------
 
 test_page_body_is_fetched_once_per_url() {
-    # Four content checks share one response. Fetching per check means four
-    # full page downloads against a site we just deployed to.
+    # Headers and body come from one GET. A second request (HEAD for the
+    # headers) would double the load and could describe a different response
+    # from the one the body came from.
     local log="$TMP/curl-count.log"
-    : > "$log"
-    OUT=$(
-        PATH="$STUBS:$PATH" \
-        CURL_LOG="$log" \
-        STUB_HEADERS="$FIX/headers-good.txt" \
-        STUB_HTML="$FIX/html-clean.txt" \
-        STUB_PATH_STATUS=404 \
-        MOCK_SSL="$FIX/ssl-valid.txt" \
-        bash "$AUDIT" https://example.com 2>&1
-    )
-    STATUS=$?
-    local bodies heads
-    bodies=$(grep -c -- '--max-time 15' "$log" || true)
-    heads=$(grep -c -- '-sI' "$log" || true)
-    if [[ "$bodies" -ne 1 ]]; then
-        _fail_reason="expected 1 page-body request, got ${bodies}"
+    run_stubbed "$log" https://example.com STUB_PATH_STATUS=404
+    local pages heads
+    pages=$(grep -vc 'audit_cb=' "$log" || true)
+    heads=$(grep -c -- '-sI\| -I' "$log" || true)
+    if [[ "$pages" -ne 1 ]]; then
+        _fail_reason="expected 1 page request, got ${pages}"
         return 1
     fi
-    if [[ "$heads" -ne 1 ]]; then
-        _fail_reason="expected 1 header request, got ${heads}"
+    if [[ "$heads" -ne 0 ]]; then
+        _fail_reason="expected no HEAD request, got ${heads}"
         return 1
     fi
     expect_status 0
+}
+
+test_report_describes_the_get_when_head_disagrees() {
+    # HEAD says the security headers are missing, GET (what a visitor
+    # receives) has them: the report must follow the GET.
+    local log="$TMP/curl-head-get.log"
+    run_stubbed "$log" https://example.com \
+        STUB_HEAD_HEADERS="$FIX/headers-missing-csp.txt" \
+        STUB_GET_HEADERS="$FIX/headers-good.txt"
+    expect_status 0 && expect_not_contains "Missing critical header" || return 1
+    # And the other way round: a clean HEAD must not hide a bad GET.
+    run_stubbed "$log" https://example.com \
+        STUB_HEAD_HEADERS="$FIX/headers-good.txt" \
+        STUB_GET_HEADERS="$FIX/headers-missing-csp.txt"
+    expect_status 1 && expect_contains "Missing critical header: content-security-policy"
+}
+
+test_redirect_chain_is_recorded_and_the_final_response_is_judged() {
+    local log="$TMP/curl-chain.log"
+    run_stubbed "$log" https://example.com \
+        STUB_GET_HEADERS="$FIX/headers-redirect-chain.txt" \
+        STUB_FINAL_URL="https://www.example.com/" \
+        STUB_REDIRECTS=1
+    # The 301 hop carries none of the security headers; only the final 200 does.
+    expect_status 0 \
+        && expect_contains "https://example.com (HTTP 301) -> https://www.example.com/ (HTTP 200)" \
+        && expect_contains "final URL https://www.example.com/"
+}
+
+test_page_request_is_time_redirect_and_size_bounded() {
+    local log="$TMP/curl-page-bounds.log" line
+    run_stubbed "$log" https://example.com
+    line=$(grep -v 'audit_cb=' "$log" | head -1)
+    local flag
+    for flag in '--max-time 15' '--max-redirs 5' '--max-filesize' ' -L'; do
+        if [[ "$line" != *"$flag"* ]]; then
+            _fail_reason="page request lacks '${flag}': ${line}"
+            return 1
+        fi
+    done
+    expect_status 0
+}
+
+test_a_size_limit_hit_is_reported_not_silent() {
+    run_stubbed "$TMP/curl-big.log" https://example.com STUB_GET_RC=63
+    expect_status 2 && expect_contains "larger than 2 MiB"
+}
+
+test_a_redirect_loop_is_reported() {
+    run_stubbed "$TMP/curl-loop.log" https://example.com STUB_GET_RC=47
+    expect_contains "more than 5 redirects"
+}
+
+test_a_slow_response_is_reported() {
+    run_stubbed "$TMP/curl-slow.log" https://example.com STUB_GET_RC=28
+    expect_contains "timed out after 15s"
 }
 
 # ---- Registry --------------------------------------------------------------
@@ -769,7 +816,13 @@ main() {
     it "exit: multi-url all clean exits 0"                test_multi_url_all_clean_exits_zero
     it "exit: counters reset between urls"                test_counters_reset_between_urls
 
-    it "requests: page body fetched once"                 test_page_body_is_fetched_once_per_url
+    it "requests: one GET serves headers and body"        test_page_body_is_fetched_once_per_url
+    it "requests: report follows GET when HEAD differs"   test_report_describes_the_get_when_head_disagrees
+    it "requests: redirect chain recorded, final judged"  test_redirect_chain_is_recorded_and_the_final_response_is_judged
+    it "requests: page request is bounded"                test_page_request_is_time_redirect_and_size_bounded
+    it "requests: size limit hit is reported"             test_a_size_limit_hit_is_reported_not_silent
+    it "requests: redirect loop is reported"              test_a_redirect_loop_is_reported
+    it "requests: timeout is reported"                    test_a_slow_response_is_reported
 
     echo ""
     echo "1..${TOTAL}"

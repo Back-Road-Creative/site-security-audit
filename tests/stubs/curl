@@ -4,8 +4,17 @@
 # the requests the auditor makes without any network access.
 #
 #   CURL_LOG          file to append invocations to (required)
-#   STUB_HEADERS      file served for `curl -sI` (header) requests
+#   STUB_HEADERS      file served for a HEAD request and, unless overridden,
+#                     written to the -D file of a page GET
+#   STUB_HEAD_HEADERS overrides STUB_HEADERS for HEAD only
+#   STUB_GET_HEADERS  overrides STUB_HEADERS for the page GET only. May hold
+#                     several response blocks, as curl -D writes for -L
 #   STUB_HTML         file served for body requests
+#   STUB_FINAL_URL    %{url_effective} of the page GET (default: the request)
+#   STUB_REDIRECTS    %{num_redirects} of the page GET (default 0)
+#   STUB_GET_STATUS   %{http_code} of the page GET (default 200)
+#   STUB_GET_RC       exit code of the page GET (default 0), e.g. 63 for
+#                     --max-filesize, 47 for --max-redirs, 28 for --max-time
 #   STUB_PATH_STATUS  status for path probes with no STUB_PATHS entry (default 404)
 #   STUB_PATHS        file of `path:status[:body-file[:content-type[:large]]]` lines that
 #                     answers path probes. The line keyed `@baseline` answers the
@@ -88,8 +97,21 @@ if [[ "$url" == *"?audit_cb="* ]]; then
 fi
 
 if [[ "$args" == *"-sI"* ]]; then
-    f=$(pick headers "${STUB_HEADERS:-}")
+    f=$(pick headers "${STUB_HEAD_HEADERS:-${STUB_HEADERS:-}}")
     [[ -n "$f" && -f "$f" ]] && cat "$f"
+elif [[ -n "$hdrfile" ]]; then
+    # Page GET: headers to the -D file, body to the -o file, -w on stdout.
+    f=$(pick headers "${STUB_GET_HEADERS:-${STUB_HEADERS:-}}")
+    : > "$hdrfile"
+    [[ -n "$f" && -f "$f" ]] && cat "$f" > "$hdrfile"
+    f=$(pick html "${STUB_HTML:-}")
+    : > "$outfile"
+    [[ -n "$f" && -f "$f" ]] && cat "$f" > "$outfile"
+    out="${wfmt//%\{url_effective\}/${STUB_FINAL_URL:-$url}}"
+    out="${out//%\{num_redirects\}/${STUB_REDIRECTS:-0}}"
+    out="${out//%\{http_code\}/${STUB_GET_STATUS:-200}}"
+    printf '%s' "$out"
+    exit "${STUB_GET_RC:-0}"
 else
     f=$(pick html "${STUB_HTML:-}")
     [[ -n "$f" && -f "$f" ]] && cat "$f"

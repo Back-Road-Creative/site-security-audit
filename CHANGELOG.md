@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format follows
   ("inconclusive"), and only content-confirmed files are critical. Redirects,
   401/403/429/503 answers and oversize responses are classified separately.
   Reports carry status, media type, size and a digest, never the body.
+- Headers and body now come from one bounded GET (15 s, 5 redirects, 2 MiB)
+  instead of a HEAD plus a second GET, so the report describes the response a
+  visitor receives even when a server answers HEAD differently. The redirect
+  chain and final URL are reported, and a timeout, redirect loop or size limit
+  is a warning.
 
 ## 0.1.0
 
