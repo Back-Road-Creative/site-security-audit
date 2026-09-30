@@ -21,7 +21,7 @@ $ ./security-audit.sh https://example.com
 [WARN]  security-headers: Missing advisory header: permissions-policy
 
 ── Exposed Paths ──
-[CRITICAL] exposed-paths: /.env is publicly accessible (HTTP 200)
+[CRITICAL] exposed-paths: /.env is publicly accessible (HTTP 200) — text/plain, 143 bytes, digest sha256:3f2a9c81b0de
 [PASS]  exposed-paths: probed 30 sensitive paths
 
 ── Content Analysis ──
@@ -58,7 +58,7 @@ returns an exit code a CI job can act on.
 | Critical security headers | critical | `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options`, `Strict-Transport-Security` |
 | Advisory security headers | warning | `Referrer-Policy`, `Permissions-Policy` |
 | Server fingerprinting | warning | `X-Powered-By`, and a `Server` header carrying a version number |
-| Exposed paths | critical | 30 commonly-leaked paths — `.env`, `.git/config`, `.git/HEAD`, `wp-config.php`, `backup.zip`, `db.sql`, `.htpasswd`, `phpinfo.php`, `.DS_Store`, `Makefile` and friends — any HTTP 200 is a finding |
+| Exposed paths | critical / warning | 30 commonly-leaked paths — `.env`, `.git/config`, `.git/HEAD`, `wp-config.php`, `backup.zip`, `db.sql`, `.htpasswd`, `phpinfo.php`, `.DS_Store`, `Makefile` and friends. A 200 is critical only when the body is recognisably the file and is not the page the site serves for a path that cannot exist; a 200 that cannot be confirmed is a warning (inconclusive). See [How a path probe is judged](#how-a-path-probe-is-judged) |
 | E-mail addresses in HTML | critical | Anything address-shaped in the served page, minus an allowlist |
 | Phone numbers in HTML | warning | US-format numbers, minus an allowlist |
 | Secrets in bundles | critical | AWS keys, GitHub PATs/OAuth tokens, GitLab PATs, Slack tokens, OpenAI/Stripe keys, webhook secrets, JWTs, Google API keys, and hardcoded `password:` / `secret_key:` assignments inside `<script>` blocks |
@@ -148,7 +148,7 @@ Both accept a comma- or whitespace-separated list.
     {
       "severity": "CRITICAL",
       "category": "exposed-paths",
-      "message": "/.env is publicly accessible (HTTP 200)"
+      "message": "/.env is publicly accessible (HTTP 200) — text/plain, 143 bytes, digest sha256:3f2a9c81b0de"
     }
   ]
 }
@@ -177,12 +177,34 @@ likely to bite you — `preload` is close to irreversible, and `style-src
 'unsafe-inline'` is a deliberate, explained compromise. Read it before shipping
 it; it is a starting point, not a drop-in.
 
+## How a path probe is judged
+
+A bare "the server said 200" is not evidence of an exposure: many hosts answer
+every URL with a 200 page (single-page apps, soft-404 templates). So each run
+first fetches one path that cannot exist (`/audit-missing-<random>`) and
+compares every probe with that baseline:
+
+| Probe answer | Verdict |
+|---|---|
+| 200, same media type and same bytes as the baseline (the probed path is masked out, so a "`/x` was not found" page still matches) | not an exposure; counted as matching the catch-all baseline |
+| 200 and the body matches what that file really looks like (`KEY=value` lines for `.env`, `[core]` for `.git/config`, `CREATE TABLE` for a dump, a password form for `/admin`, ...) | **critical** |
+| 200 and a non-HTML response over the read limit at a probed path | **critical** (the content cannot be read, so the media type decides) |
+| 200 and anything else | **warning: inconclusive**, never promoted to critical |
+| 3xx | reported as redirected, not an exposure |
+| 401, 403, 407, 429, 503 | reported as restricted (auth wall or challenge), not an exposure |
+| anything else | absent |
+
+Reports never contain response bodies. A finding carries the status, media type,
+size and a short digest (`sha256:` of the body, `cksum:` where no SHA tool
+exists) so two runs can be compared without printing what may be a secret.
+Probes do not follow redirects and are bounded to 5 seconds and 64 KiB each.
+
 ## Testing and development
 
 The script is mockable end to end, so the test suite makes no network calls:
 
 ```bash
-./tests/run-tests.sh          # 47 tests
+./tests/run-tests.sh          # the whole suite
 ./tests/run-tests.sh pii      # only tests whose name contains "pii"
 ```
 
@@ -194,8 +216,8 @@ checks against your own fixtures:
 | `MOCK_HEADERS` | file served instead of `curl -I` |
 | `MOCK_HTML` | file served instead of the page body |
 | `MOCK_SSL` | file served instead of `openssl x509 -dates` |
-| `MOCK_PATH_STATUS` | one HTTP status returned for every path probe |
-| `MOCK_PATH_RESPONSES` | file of `path:status` lines, unlisted paths default to 404 |
+| `MOCK_PATH_STATUS` | one HTTP status returned for every path probe (with no body, a 200 is inconclusive) |
+| `MOCK_PATH_RESPONSES` | file of `path:status[:body-file[:content-type]]` lines, unlisted paths default to 404. The line keyed `@baseline` describes the missing-path baseline (default 404). A relative body file is read from the directory of this file |
 
 ```bash
 MOCK_HEADERS=tests/fixtures/headers-good.txt \
@@ -221,9 +243,11 @@ AUDIT_SCRIPT=/path/to/other/security-audit.sh ./tests/run-tests.sh
   the front page does not reference will not be found. Pass the URLs that matter,
   or run a source-level secret scanner as well — this is not a replacement for
   one.
-- **Path probing is a fixed list of 30 names.** A 200 is strong evidence; a clean
-  run is weak evidence. Hosts that answer 200 with a styled "not found" page will
-  produce false criticals — check one by hand before believing the report.
+- **Path probing is a fixed list of 30 names.** A confirmed hit is strong
+  evidence; a clean run is weak evidence. Content signatures are simple text
+  patterns, so an unusual file (a `.env` written as JSON, a dump in a format the
+  pattern does not know) that the site serves with a 200 is reported as
+  *inconclusive*, not critical, and needs a look by hand.
 - **The secret patterns are prefix-based.** They catch credentials that carry a
   recognisable prefix. A bare high-entropy string, a base64 blob, or a
   provider whose format is not listed will pass straight through.

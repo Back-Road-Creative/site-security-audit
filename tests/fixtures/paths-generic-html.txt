@@ -1,0 +1,3 @@
+# The baseline is a real 404, but .env answers 200 with an HTML page that has
+# no dotenv content: cannot be confirmed as the file.
+.env:200:body-soft404.html:text/html

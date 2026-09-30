@@ -12,7 +12,8 @@ string is a synthetic placeholder that has never been issued by any provider.
 | `headers-*` | response headers | `MOCK_HEADERS` |
 | `html-*` | page body | `MOCK_HTML` |
 | `ssl-*` | `openssl x509 -dates` output | `MOCK_SSL` |
-| `paths-*` | path-probe statuses | `MOCK_PATH_RESPONSES` |
+| `paths-*` | path-probe answers, `path:status[:body-file[:content-type]]` | `MOCK_PATH_RESPONSES` |
+| `body-*` | bodies the `paths-*` files point at (real-file content, soft-404 and login pages) | via `paths-*` |
 
 ## The false-positive fixtures
 

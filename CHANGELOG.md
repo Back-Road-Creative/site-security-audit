@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Exposed-path probes no longer report a critical for every 200. Each run
+  fetches a random missing path as a baseline; a 200 that matches it is a
+  catch-all page, a 200 whose body is not recognisably the file is a warning
+  ("inconclusive"), and only content-confirmed files are critical. Redirects,
+  401/403/429/503 answers and oversize responses are classified separately.
+  Reports carry status, media type, size and a digest, never the body.
+
 ## 0.1.0
 
 First public release.

@@ -1,0 +1,7 @@
+# A soft-404 site: the random-path baseline and every sensitive path return
+# the same 200 page.
+@baseline:200:body-soft404.html:text/html
+.env:200:body-soft404.html:text/html
+.git/config:200:body-soft404.html:text/html
+admin:200:body-soft404.html:text/html
+backup.zip:200:body-soft404.html:text/html

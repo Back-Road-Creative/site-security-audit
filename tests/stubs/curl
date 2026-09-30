@@ -6,7 +6,13 @@
 #   CURL_LOG          file to append invocations to (required)
 #   STUB_HEADERS      file served for `curl -sI` (header) requests
 #   STUB_HTML         file served for body requests
-#   STUB_PATH_STATUS  status echoed for `-w %{http_code}` probes (default 404)
+#   STUB_PATH_STATUS  status for path probes with no STUB_PATHS entry (default 404)
+#   STUB_PATHS        file of `path:status[:body-file[:content-type[:large]]]` lines that
+#                     answers path probes. The line keyed `@baseline` answers the
+#                     random missing-path probe. `@PATH@` in a body file is
+#                     replaced with the requested path, to model a soft-404 page
+#                     that echoes the URL. A fifth field `large` makes the stub
+#                     exit 63, as curl does at --max-filesize.
 #   STUB_MAP          directory of per-host overrides: <host>.headers and
 #                     <host>.html win over STUB_HEADERS / STUB_HTML. Lets one
 #                     run serve a different site per URL.
@@ -16,17 +22,25 @@ printf '%s\n' "$*" >> "${CURL_LOG:?CURL_LOG must be set}"
 
 args="$*"
 
-# Host of the requested URL, for the per-host override lookup.
-host=""
-for a in "$@"; do
-    case "$a" in
-        http://*|https://*)
-            host="${a#*://}"
-            host="${host%%/*}"
-            host="${host%%\?*}"
-            ;;
+# Options the auditor passes that change what the stub must produce.
+url="" outfile="" hdrfile="" wfmt=""
+argv=("$@")
+for ((i = 0; i < ${#argv[@]}; i++)); do
+    case "${argv[i]}" in
+        -o) outfile="${argv[i+1]:-}" ;;
+        -D) hdrfile="${argv[i+1]:-}" ;;
+        -w) wfmt="${argv[i+1]:-}" ;;
+        http://*|https://*) url="${argv[i]}" ;;
     esac
 done
+
+# Host of the requested URL, for the per-host override lookup.
+host=""
+if [[ -n "$url" ]]; then
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host%%\?*}"
+fi
 
 pick() { # $1 = suffix, $2 = fallback file
     if [[ -n "${STUB_MAP:-}" && -n "$host" && -f "${STUB_MAP}/${host}.$1" ]]; then
@@ -36,9 +50,44 @@ pick() { # $1 = suffix, $2 = fallback file
     fi
 }
 
-if [[ "$args" == *"%{http_code}"* ]]; then
-    printf '%s' "${STUB_PATH_STATUS:-404}"
-elif [[ "$args" == *"-sI"* ]]; then
+# A path probe carries the cache-busting query; nothing else does.
+if [[ "$url" == *"?audit_cb="* ]]; then
+    req="${url#*://}"
+    req="${req#*/}"
+    req="${req%%\?*}"
+    key="$req"
+    [[ "$req" == audit-missing-* ]] && key="@baseline"
+
+    status="${STUB_PATH_STATUS:-404}" bodyfile="" ctype="" large=""
+    if [[ -n "${STUB_PATHS:-}" && -f "${STUB_PATHS}" ]]; then
+        status="404"
+        while IFS=: read -r p s b c l; do
+            [[ -z "$p" || "$p" == \#* ]] && continue
+            if [[ "$p" == "$key" ]]; then
+                status="$s" bodyfile="$b" ctype="$c" large="$l"
+                break
+            fi
+        done < "$STUB_PATHS"
+    fi
+
+    if [[ -n "$hdrfile" ]]; then
+        printf 'HTTP/1.1 %s\r\nContent-Type: %s\r\n\r\n' "$status" "$ctype" > "$hdrfile"
+    fi
+    if [[ -n "$outfile" ]]; then
+        if [[ -n "$bodyfile" && -f "$bodyfile" ]]; then
+            body=$(cat "$bodyfile")
+            printf '%s\n' "${body//@PATH@/$req}" > "$outfile"
+        else
+            : > "$outfile"
+        fi
+    fi
+    out="${wfmt//%\{http_code\}/$status}"
+    printf '%s' "$out"
+    [[ "$large" == "large" ]] && exit 63
+    exit 0
+fi
+
+if [[ "$args" == *"-sI"* ]]; then
     f=$(pick headers "${STUB_HEADERS:-}")
     [[ -n "$f" && -f "$f" ]] && cat "$f"
 else
