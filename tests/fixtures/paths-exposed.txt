@@ -1,3 +1,4 @@
-.env:200
-.git/config:200
+# path:status[:body-file[:content-type]] — body files resolve next to this file.
+.env:200:body-env.txt:text/plain
+.git/config:200:body-git-config.txt:text/plain
 .gitignore:404

@@ -1,0 +1,6 @@
+.env:200:body-env.txt:text/plain
+.git/config:200:body-git-config.txt:text/plain
+.git/HEAD:200:body-git-head.txt:text/plain
+db.sql:200:body-dump.sql:application/sql
+backup.zip:200:body-archive.zip:application/zip
+admin:200:body-login.html:text/html

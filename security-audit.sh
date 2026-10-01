@@ -26,11 +26,12 @@
 #                                  "15550101234").
 #
 # Environment (test mode):
-#   MOCK_HEADERS  — file with mock curl -I response
+#   MOCK_HEADERS  — file with mock response headers
 #   MOCK_HTML     — file with mock HTML source
 #   MOCK_SSL      — file with mock openssl cert output
 #   MOCK_PATH_STATUS    — fixed HTTP status for all path probes
-#   MOCK_PATH_RESPONSES — file with "path:status" lines
+#   MOCK_PATH_RESPONSES — file with "path:status[:body-file[:content-type]]"
+#                         lines; "@baseline" describes the missing-path probe
 # =============================================================================
 set -uo pipefail
 
@@ -40,6 +41,8 @@ VERSION="1.0.0"
 TEST_MODE=false
 JSON_MODE=false
 URLS=()
+# Scratch space for response bodies and headers; created in main, removed on exit.
+SCRATCH=""
 
 # ---- Severity tracking ----
 CRITICALS=0
@@ -152,73 +155,160 @@ log_crit()  {
 }
 
 # ---- Data fetchers (mockable for testing) ----
-# Six checks need the same two responses. Without a cache that is six requests
-# against a site we have just deployed to; prime_response_cache makes it two.
+# Headers and body come from ONE bounded GET per URL. A separate HEAD for the
+# headers doubles the requests against a site we have just deployed to, and can
+# describe a different response from the one the body came from: servers and
+# CDNs routinely answer HEAD differently (another cache key, a missing
+# Content-Security-Policy, a 405). So no HEAD is ever sent, and the report
+# describes what a visitor's GET receives.
+#
 # The cache is filled from run_audit (not from inside a $(...) capture, where an
 # assignment would be discarded with the subshell) and keyed by URL so a
 # multi-URL run never serves one site's body for another.
+PAGE_MAX_TIME=15
+PAGE_MAX_REDIRS=5
+PAGE_MAX_BYTES=2097152   # 2 MiB
 _CACHE_URL=""
 _CACHE_HEADERS=""
 _CACHE_HTML=""
+_CACHE_CHAIN=""          # "url (HTTP 301) -> url (HTTP 200)"; empty under a mock
+_CACHE_FINAL=""
+_CACHE_RC=0
+
+# Reads a curl -D dump (one header block per redirect hop). Sets _CACHE_HEADERS
+# to the LAST block, the response the visitor ends up on, and _CACHE_CHAIN to
+# the hop-by-hop chain. A relative Location is recorded as sent.
+_parse_header_dump() {
+    local file="$1" line block="" code="" cur="$2" next="" chain=""
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        if [[ "$line" == HTTP/* ]]; then
+            if [[ -n "$code" ]]; then
+                chain+="${cur} (HTTP ${code}) -> "
+                [[ -n "$next" ]] && cur="$next"
+            fi
+            block="" next=""
+            code="${line#* }"
+            code="${code%% *}"
+        elif [[ "${line,,}" == location:* ]]; then
+            next=$(_trim "${line#*:}")
+        fi
+        [[ -z "$line" ]] || block+="${line}"$'\n'
+    done < "$file"
+    _CACHE_HEADERS="${block%$'\n'}"
+    [[ -n "$code" ]] && _CACHE_CHAIN="${chain}${cur} (HTTP ${code})"
+    return 0
+}
 
 prime_response_cache() {
     local url="$1"
-    _CACHE_URL=""
-    if [[ -n "${MOCK_HEADERS:-}" && -f "${MOCK_HEADERS}" ]]; then
-        _CACHE_HEADERS=$(cat "$MOCK_HEADERS")
-    else
-        _CACHE_HEADERS=$(curl -sI --max-time 10 "$url" 2>/dev/null)
+    _CACHE_URL="" _CACHE_HEADERS="" _CACHE_HTML="" _CACHE_CHAIN="" _CACHE_FINAL="$url" _CACHE_RC=0
+    local mock_h=false mock_b=false
+    [[ -n "${MOCK_HEADERS:-}" && -f "${MOCK_HEADERS}" ]] && mock_h=true
+    [[ -n "${MOCK_HTML:-}" && -f "${MOCK_HTML}" ]] && mock_b=true
+
+    # No request at all when both halves are mocked.
+    if ! { $mock_h && $mock_b; }; then
+        local body="${SCRATCH}/page.body" hdr="${SCRATCH}/page.hdr" final
+        rm -f "$body" "$hdr"
+        final=$(curl -s -L --max-redirs "$PAGE_MAX_REDIRS" --proto-redir =http,https \
+            --max-time "$PAGE_MAX_TIME" --max-filesize "$PAGE_MAX_BYTES" \
+            -D "$hdr" -o "$body" -w '%{url_effective}' "$url" 2>/dev/null)
+        _CACHE_RC=$?
+        [[ -n "$final" ]] && _CACHE_FINAL="$final"
+        [[ -f "$hdr" ]] && _parse_header_dump "$hdr" "$url"
+        [[ -f "$body" ]] && _CACHE_HTML=$(head -c "$PAGE_MAX_BYTES" "$body" 2>/dev/null | tr -d '\0')
     fi
-    if [[ -n "${MOCK_HTML:-}" && -f "${MOCK_HTML}" ]]; then
-        _CACHE_HTML=$(cat "$MOCK_HTML")
-    else
-        _CACHE_HTML=$(curl -s --max-time 15 "$url" 2>/dev/null)
-    fi
+    $mock_h && _CACHE_HEADERS=$(cat "$MOCK_HEADERS")
+    $mock_b && _CACHE_HTML=$(cat "$MOCK_HTML")
     _CACHE_URL="$url"
+    return 0
 }
 
-fetch_headers() {
-    local url="$1"
-    if [[ "$_CACHE_URL" == "$url" ]]; then
-        printf '%s\n' "$_CACHE_HEADERS"
-        return
-    fi
-    if [[ -n "${MOCK_HEADERS:-}" && -f "${MOCK_HEADERS}" ]]; then
-        cat "$MOCK_HEADERS"
-    else
-        curl -sI --max-time 10 "$url" 2>/dev/null
-    fi
+fetch_headers() { [[ "$_CACHE_URL" == "$1" ]] && printf '%s\n' "$_CACHE_HEADERS"; }
+fetch_html()    { [[ "$_CACHE_URL" == "$1" ]] && printf '%s\n' "$_CACHE_HTML"; }
+
+# One path probe. Results land in PROBE_* globals rather than on stdout because
+# the caller needs four values and a $(...) capture would run in a subshell.
+#   PROBE_STATUS  HTTP status ("000" when curl got no response)
+#   PROBE_CTYPE   lower-cased media type, no parameters ("" when absent)
+#   PROBE_BODY    at most PROBE_MAX_BYTES of the body, NUL bytes dropped
+#   PROBE_LARGE   1 when curl stopped at the size limit, so PROBE_BODY is empty
+#                 or partial
+PROBE_MAX_BYTES=65536
+PROBE_STATUS="" PROBE_CTYPE="" PROBE_BODY="" PROBE_LARGE=0
+
+# Media type only, lower-cased: "Text/HTML; charset=UTF-8\r" -> "text/html".
+_norm_ctype() {
+    local ct="${1%%;*}"
+    ct="${ct//$'\r'/}"
+    _trim "$ct" | tr '[:upper:]' '[:lower:]'
 }
 
-fetch_html() {
-    local url="$1"
-    if [[ "$_CACHE_URL" == "$url" ]]; then
-        printf '%s\n' "$_CACHE_HTML"
-        return
-    fi
-    if [[ -n "${MOCK_HTML:-}" && -f "${MOCK_HTML}" ]]; then
-        cat "$MOCK_HTML"
-    else
-        curl -s --max-time 15 "$url" 2>/dev/null
-    fi
+# Mock lookup for MOCK_PATH_RESPONSES: `path:status[:body-file[:content-type]]`.
+# A relative body file is read from the directory the responses file is in.
+_mock_path_entry() {
+    local key="$1" p s b c dir
+    dir=$(dirname "$MOCK_PATH_RESPONSES")
+    while IFS=: read -r p s b c; do
+        [[ -z "$p" || "$p" == \#* ]] && continue
+        if [[ "$p" == "$key" ]]; then
+            PROBE_STATUS="${s// /}"
+            PROBE_CTYPE=$(_norm_ctype "$c")
+            if [[ -n "$b" ]]; then
+                [[ "$b" == /* ]] || b="${dir}/${b}"
+                PROBE_BODY=$(tr -d '\0' < "$b" 2>/dev/null)
+            fi
+            return 0
+        fi
+    done < "$MOCK_PATH_RESPONSES"
+    return 1
 }
 
-fetch_path_status() {
+fetch_path_probe() {
     local url="$1" path="$2"
-    if [[ -n "${MOCK_PATH_STATUS:-}" ]]; then
-        echo "$MOCK_PATH_STATUS"
+    PROBE_STATUS="" PROBE_CTYPE="" PROBE_BODY="" PROBE_LARGE=0
+
+    if [[ "$path" == "@baseline" ]]; then
+        # Under a mock only the responses file can describe the baseline, and
+        # a missing entry means the site returns a real 404.
+        if [[ -n "${MOCK_PATH_RESPONSES:-}" && -f "${MOCK_PATH_RESPONSES}" ]]; then
+            _mock_path_entry "@baseline" || PROBE_STATUS=404
+            return
+        fi
+        if [[ -n "${MOCK_PATH_STATUS:-}" ]]; then
+            PROBE_STATUS=404
+            return
+        fi
+    elif [[ -n "${MOCK_PATH_STATUS:-}" ]]; then
+        PROBE_STATUS="$MOCK_PATH_STATUS"
+        return
+    elif [[ -n "${MOCK_PATH_RESPONSES:-}" && -f "${MOCK_PATH_RESPONSES}" ]]; then
+        _mock_path_entry "$path" || PROBE_STATUS=404
         return
     fi
-    if [[ -n "${MOCK_PATH_RESPONSES:-}" && -f "${MOCK_PATH_RESPONSES}" ]]; then
-        local status
-        status=$(grep "^${path}:" "$MOCK_PATH_RESPONSES" 2>/dev/null | cut -d: -f2 | tr -d ' ')
-        echo "${status:-404}"
-        return
-    fi
+
+    local real="$path"
+    [[ "$path" == "@baseline" ]] && real="$PROBE_BASELINE_TOKEN"
+    local body="${SCRATCH}/probe.body" hdr="${SCRATCH}/probe.hdr" rc
+    rm -f "$body" "$hdr"
     # Cache-busting query: the audit runs seconds after a deploy, and a CDN
     # edge can otherwise serve a stale pre-deploy response for a path the
     # deploy just removed (false CRITICAL). Origin-served files still 200.
-    curl -s -o /dev/null -w "%{http_code}" --max-time 5 "${url}/${path}?audit_cb=$$$(date +%s)" 2>/dev/null
+    # No -L: a redirect is an answer in its own right. --max-filesize and
+    # --max-time bound what a hostile or misconfigured site can make us read.
+    PROBE_STATUS=$(curl -s -o "$body" -D "$hdr" -w "%{http_code}" \
+        --max-time 5 --max-filesize "$PROBE_MAX_BYTES" \
+        "${url}/${real}?audit_cb=$$$(date +%s)" 2>/dev/null)
+    rc=$?
+    PROBE_STATUS="${PROBE_STATUS:-000}"
+    [[ "$rc" -eq 63 ]] && PROBE_LARGE=1
+    if [[ -f "$hdr" ]]; then
+        PROBE_CTYPE=$(_norm_ctype "$(grep -i '^content-type:' "$hdr" | tail -1 | cut -d: -f2-)")
+    fi
+    if [[ -f "$body" ]]; then
+        PROBE_BODY=$(head -c "$PROBE_MAX_BYTES" "$body" 2>/dev/null | tr -d '\0')
+    fi
 }
 
 fetch_ssl() {
@@ -284,6 +374,22 @@ is_allowed_phone() {
 
 # ---- Check functions ----
 
+# Report how the one response was obtained: the redirect chain, and any limit
+# curl stopped at. Silent under a mock, where there is no request to describe.
+check_response() {
+    local rc="$_CACHE_RC"
+    if [[ -n "$_CACHE_CHAIN" ]]; then
+        log_pass "response: ${_CACHE_CHAIN} — final URL ${_CACHE_FINAL}; headers and body from this one GET (no HEAD sent)"
+    fi
+    case "$rc" in
+        0) ;;
+        28) log_warn "response" "request timed out after ${PAGE_MAX_TIME}s; results reflect a partial or missing response" ;;
+        47) log_warn "response" "more than ${PAGE_MAX_REDIRS} redirects; the chain was not followed to a final page" ;;
+        63) log_warn "response" "page is larger than $((PAGE_MAX_BYTES / 1048576)) MiB; content checks ran on a truncated body" ;;
+        *)  log_warn "response" "request did not complete cleanly (curl exit ${rc})" ;;
+    esac
+}
+
 check_headers() {
     local url="$1"
     local headers
@@ -328,17 +434,175 @@ check_server_fingerprint() {
     fi
 }
 
+# Short fingerprint of a response body, so a report can show that two responses
+# are the same without ever printing the (possibly secret) content.
+_digest() {
+    local d
+    if command -v sha256sum >/dev/null 2>&1; then
+        d=$(printf '%s' "$1" | sha256sum | cut -c1-12)
+        printf 'sha256:%s' "$d"
+    elif command -v shasum >/dev/null 2>&1; then
+        d=$(printf '%s' "$1" | shasum -a 256 | cut -c1-12)
+        printf 'sha256:%s' "$d"
+    else
+        d=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+        printf 'cksum:%s' "$d"
+    fi
+}
+
+# What real content looks like at each probed path. Sets:
+#   RULE_SIG      extended regex (case-insensitive) that the real file's body
+#                 matches; empty when the path has no text signature
+#   RULE_ANYTYPE  1 when the signature is expected inside an HTML page (a login
+#                 form, phpinfo output), 0 for a file that is never HTML
+#   RULE_OPAQUE   1 for a binary artefact with no text signature; a non-HTML
+#                 response is then taken as the file
+_path_rule() {
+    RULE_SIG="" RULE_ANYTYPE=0 RULE_OPAQUE=0
+    case "$1" in
+        .env|.env.local|.env.production)
+            RULE_SIG='^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' ;;
+        .git/config)   RULE_SIG='^\[(core|remote|branch|user)[^]]*\]' ;;
+        .git/HEAD)     RULE_SIG='^ref: refs/|^[0-9a-f]{40}$' ;;
+        .gitignore)    RULE_SIG='^[!#/*.A-Za-z0-9_-][^<>]*$' ;;
+        wp-config.php) RULE_SIG='DB_NAME|DB_PASSWORD|table_prefix|AUTH_KEY' ;;
+        .htpasswd)     RULE_SIG='^[^:[:space:]<>]+:(\$|\{SHA\}|[./A-Za-z0-9]{13})' ;;
+        .htaccess)     RULE_SIG='RewriteEngine|RewriteRule|AuthType|<IfModule|ErrorDocument|Require ' ;;
+        db.sql|dump.sql)
+            RULE_SIG='CREATE TABLE|INSERT INTO|DROP TABLE|MySQL dump|PostgreSQL database dump' ;;
+        config.json)   RULE_SIG='^[[:space:]]*[{[]' ;;
+        package.json)  RULE_SIG='"(name|version|dependencies|devDependencies|scripts)"[[:space:]]*:' ;;
+        composer.json) RULE_SIG='"(name|require|autoload)"[[:space:]]*:' ;;
+        config.yml|config.toml)
+            RULE_SIG='^[A-Za-z0-9_.-]+[[:space:]]*[:=]|^\[[A-Za-z0-9_.-]+\]' ;;
+        Gemfile)       RULE_SIG='^(source|gem|ruby|group)[[:space:]]' ;;
+        Makefile)      RULE_SIG='^[A-Za-z0-9_.-]+[[:space:]]*:|^\.PHONY' ;;
+        debug.log|error_log)
+            RULE_SIG='\[(error|warn|notice)\]|PHP (Warning|Notice|Fatal)|^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}' ;;
+        phpinfo.php)   RULE_SIG='phpinfo\(\)|PHP Version'; RULE_ANYTYPE=1 ;;
+        server-status) RULE_SIG='Apache Server Status|Server Version:'; RULE_ANYTYPE=1 ;;
+        xmlrpc.php)    RULE_SIG='XML-RPC server accepts POST requests only'; RULE_ANYTYPE=1 ;;
+        wp-login.php)  RULE_SIG='user_login|wp-submit'; RULE_ANYTYPE=1 ;;
+        wp-admin|admin|login)
+            RULE_SIG='type=["'"'"']?password'; RULE_ANYTYPE=1 ;;
+        backup.zip|backup.tar.gz|.DS_Store) RULE_OPAQUE=1 ;;
+    esac
+}
+
+_is_html_type() {
+    [[ "$1" == text/html || "$1" == application/xhtml+xml ]]
+}
+
+# Two page bodies are "the same page" when they match once the path each was
+# requested under is masked: a soft-404 that says "/foo was not found" would
+# otherwise differ from the baseline in exactly the bytes we vary.
+_mask_path() {
+    local body="$1" path="$2"
+    [[ -n "$path" ]] && body="${body//"$path"/@PATH@}"
+    printf '%s' "$body"
+}
+
+# Classify the current PROBE_* against the baseline. Sets PROBE_VERDICT to one
+# of: absent | redirect | restricted | catchall | exposed | inconclusive.
+# Anything not proven to be the real file stays inconclusive; it is never
+# promoted to exposed just because the status was 200.
+classify_probe() {
+    local path="$1"
+    PROBE_VERDICT="absent"
+    case "$PROBE_STATUS" in
+        200) ;;
+        3[0-9][0-9]) PROBE_VERDICT="redirect"; return ;;
+        401|403|407|429|503) PROBE_VERDICT="restricted"; return ;;
+        *) return ;;
+    esac
+
+    # Same status, media type and (path-masked) bytes as a path that cannot
+    # exist: the site answers everything with one page.
+    if [[ "$PROBE_BASELINE_STATUS" == "200" \
+          && "$PROBE_CTYPE" == "$PROBE_BASELINE_CTYPE" \
+          && "$PROBE_LARGE" == "$PROBE_BASELINE_LARGE" ]]; then
+        if [[ "$(_mask_path "$PROBE_BODY" "$path")" \
+              == "$(_mask_path "$PROBE_BASELINE_BODY" "$PROBE_BASELINE_TOKEN")" ]]; then
+            PROBE_VERDICT="catchall"
+            return
+        fi
+    fi
+
+    _path_rule "$path"
+    local html=false
+    _is_html_type "$PROBE_CTYPE" && html=true
+
+    if [[ "$PROBE_LARGE" == "1" ]]; then
+        # Over the read limit: content cannot be inspected, but a large
+        # non-HTML answer at one of these paths is not a page.
+        if ! $html && [[ -n "$PROBE_CTYPE" ]]; then
+            PROBE_VERDICT="exposed"
+        else
+            PROBE_VERDICT="inconclusive"
+        fi
+        return
+    fi
+    if [[ -n "$RULE_SIG" ]]; then
+        if [[ "$RULE_ANYTYPE" == "1" ]] || ! $html; then
+            if printf '%s\n' "$PROBE_BODY" | grep -Eiq -- "$RULE_SIG"; then
+                PROBE_VERDICT="exposed"
+                return
+            fi
+        fi
+    elif [[ "$RULE_OPAQUE" == "1" ]] && ! $html && [[ -n "$PROBE_CTYPE" ]]; then
+        PROBE_VERDICT="exposed"
+        return
+    fi
+    PROBE_VERDICT="inconclusive"
+}
+
+PROBE_BASELINE_TOKEN="" PROBE_BASELINE_STATUS="" PROBE_BASELINE_CTYPE=""
+PROBE_BASELINE_BODY="" PROBE_BASELINE_LARGE=0 PROBE_VERDICT=""
+
 check_exposed_paths() {
-    local url="$1"
+    local url="$1" path
+    local n_exposed=0 n_inconc=0 n_catchall=0 n_redirect=0 n_restricted=0
+
+    # A path that cannot exist, fetched the same way as the real probes, shows
+    # what the site says for "not found". If that is a 200 page, a 200 for
+    # /.env proves nothing on its own.
+    PROBE_BASELINE_TOKEN="audit-missing-$$-${RANDOM}${RANDOM}"
+    fetch_path_probe "$url" "@baseline"
+    PROBE_BASELINE_STATUS="$PROBE_STATUS"
+    PROBE_BASELINE_CTYPE="$PROBE_CTYPE"
+    PROBE_BASELINE_BODY="$PROBE_BODY"
+    PROBE_BASELINE_LARGE="$PROBE_LARGE"
 
     for path in "${EXPOSED_PATHS[@]}"; do
-        local status
-        status=$(fetch_path_status "$url" "$path")
-        if [[ "$status" == "200" ]]; then
-            log_crit "exposed-paths" "/${path} is publicly accessible (HTTP 200)"
-        fi
+        fetch_path_probe "$url" "$path"
+        classify_probe "$path"
+        local detail
+        detail="${PROBE_CTYPE:-no content-type}, ${#PROBE_BODY} bytes, digest $(_digest "$PROBE_BODY")"
+        case "$PROBE_VERDICT" in
+            exposed)
+                n_exposed=$((n_exposed + 1))
+                log_crit "exposed-paths" "/${path} is publicly accessible (HTTP 200) — ${detail}"
+                ;;
+            inconclusive)
+                n_inconc=$((n_inconc + 1))
+                log_warn "exposed-paths" "/${path} returned HTTP 200 but the content is not confirmed as the file (${detail}) — inconclusive, check by hand"
+                ;;
+            catchall)  n_catchall=$((n_catchall + 1)) ;;
+            redirect)  n_redirect=$((n_redirect + 1)) ;;
+            restricted) n_restricted=$((n_restricted + 1)) ;;
+        esac
     done
-    log_pass "exposed-paths: probed ${#EXPOSED_PATHS[@]} sensitive paths"
+
+    local notes=()
+    [[ "$n_catchall" -gt 0 ]] && notes+=("${n_catchall} matched the catch-all baseline and were not treated as exposures")
+    [[ "$n_redirect" -gt 0 ]] && notes+=("${n_redirect} redirected")
+    [[ "$n_restricted" -gt 0 ]] && notes+=("${n_restricted} restricted (401/403/429/503)")
+    local suffix=""
+    if [[ ${#notes[@]} -gt 0 ]]; then
+        local IFS=';'
+        suffix=" (${notes[*]})"
+    fi
+    log_pass "exposed-paths: probed ${#EXPOSED_PATHS[@]} sensitive paths${suffix}"
 }
 
 check_pii() {
@@ -585,6 +849,10 @@ run_audit() {
 
     prime_response_cache "$url"
 
+    echo "── Response ──"
+    check_response
+
+    echo ""
     echo "── Security Headers ──"
     check_headers "$url"
     check_server_fingerprint "$url"
@@ -642,11 +910,11 @@ Environment (allowlists):
   SECURITY_AUDIT_ALLOWED_PHONES  Published numbers, e.g. "15550101234"
 
 Environment (test mode):
-  MOCK_HEADERS         Mock file for HTTP headers
+  MOCK_HEADERS         Mock file for the response headers
   MOCK_HTML            Mock file for page HTML
   MOCK_SSL             Mock file for SSL cert info
   MOCK_PATH_STATUS     Fixed HTTP status for all path probes
-  MOCK_PATH_RESPONSES  File with "path:status" lines
+  MOCK_PATH_RESPONSES  File with "path:status[:body-file[:content-type]]" lines
 
 Examples:
   ./security-audit.sh https://example.com
@@ -697,6 +965,9 @@ main() {
         usage >&2
         exit 1
     fi
+
+    SCRATCH=$(mktemp -d) || { echo "Error: cannot create a scratch directory." >&2; exit 1; }
+    trap 'rm -rf "$SCRATCH"' EXIT
 
     # Track worst exit code across all URLs. Severity order is 1 (critical) >
     # 2 (warning) > 0 (clean) — deliberately not numeric order, so a later

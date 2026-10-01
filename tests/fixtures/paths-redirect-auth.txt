@@ -1,0 +1,5 @@
+# Redirects, auth walls and challenge pages are distinct from an exposure.
+.env:401
+wp-login.php:302::text/html
+admin:403:body-soft404.html:text/html
+login:503:body-soft404.html:text/html
